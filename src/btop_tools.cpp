@@ -222,14 +222,17 @@ namespace Tools {
 		}
 		vector<wchar_t> w_str(w_len);
 		std::mbstowcs(&w_str[0], str_data, w_len);
-		for (size_t i = 0; i < w_str.size(); i++) {
+		for (size_t i = 0; i < w_str.size() - 1; i++) {
 			if (widechar_wcwidth(w_str[i]) > 1)
 				continue;
 			if (w_str[i] < 0x20)
 				w_str[i] = replacement;
 		}
-		str.resize(w_str.size());
-		std::wcstombs(&str[0], &w_str[0], w_str.size());
+		size_t bytes = std::wcstombs(nullptr, w_str.data(), 0);
+		if (bytes == static_cast<size_t>(-1))
+			return str;
+		str.resize(bytes);
+		std::wcstombs(&str[0], &w_str[0], bytes);
 
 		return str;
 	}
@@ -436,25 +439,25 @@ namespace Tools {
 			"bit"s, "Kib"s, "Mib"s,
 			"Gib"s, "Tib"s, "Pib"s,
 			"Eib"s, "Zib"s, "Yib"s,
-			"Bib"s, "GEb"s
+			"Rib"s, "Qib"s
 		};
 		static const array mebiUnits_byte {
 			"Byte"s, "KiB"s, "MiB"s,
 			"GiB"s, "TiB"s, "PiB"s,
 			"EiB"s, "ZiB"s, "YiB"s,
-			"BiB"s, "GEB"s
+			"RiB"s, "QiB"s
 		};
 		static const array megaUnits_bit {
-			"bit"s, "Kb"s, "Mb"s,
+			"bit"s, "kb"s, "Mb"s,
 			"Gb"s, "Tb"s, "Pb"s,
 			"Eb"s, "Zb"s, "Yb"s,
-			"Bb"s, "Gb"s
+			"Rb"s, "Qb"s
 		};
 		static const array megaUnits_byte {
-			"Byte"s, "KB"s, "MB"s,
+			"Byte"s, "kB"s, "MB"s,
 			"GB"s, "TB"s, "PB"s,
 			"EB"s, "ZB"s, "YB"s,
-			"BB"s, "GB"s
+			"RB"s, "QB"s
 		};
 		const auto& units = (bit) ? ( mega ? megaUnits_bit : mebiUnits_bit) : ( mega ? megaUnits_byte : mebiUnits_byte);
 
@@ -539,23 +542,83 @@ namespace Tools {
 	}
 
 	void atomic_wait(const atomic<bool>& atom, bool old) noexcept {
-		atom.wait(old, std::memory_order_relaxed);
-	}
-
-	void atomic_wait_for(const atomic<bool>& atom, bool old, const uint64_t wait_ms) noexcept {
-		const uint64_t start_time = time_ms();
-		while (atom.load(std::memory_order_relaxed) == old and (time_ms() - start_time < wait_ms)) sleep_ms(1);
+		atom.wait(old, std::memory_order_acquire);
 	}
 
 	atomic_lock::atomic_lock(atomic<bool>& atom, bool wait) : atom(atom) {
-		if (wait) while (not this->atom.compare_exchange_strong(this->not_true, true));
-		else this->atom.store(true);
-		this->atom.notify_all();
+		if (wait) {
+			bool expected = false;
+			while (not this->atom.compare_exchange_strong(expected, true, std::memory_order_acquire, std::memory_order_relaxed)) expected = false;
+		}
+		else this->atom.store(true, std::memory_order_release);
+		this->atom.notify_one();
 	}
 
 	atomic_lock::~atomic_lock() noexcept {
-		this->atom.store(false);
-		this->atom.notify_all();
+		this->atom.store(false, std::memory_order_release);
+		this->atom.notify_one();
+	}
+
+	void atomic_waiting_lock::store(bool new_value) noexcept {
+		{
+			std::lock_guard lock {mtx};
+			value = new_value;
+		}
+		cv.notify_all();
+	}
+
+	void atomic_waiting_lock::wait(bool old) const noexcept {
+		std::unique_lock lock {mtx};
+		cv.wait(lock, [this, old] { return value != old; });
+	}
+
+	void atomic_waiting_lock::wait_for(bool old, uint64_t wait_ms) const noexcept {
+		std::unique_lock lock {mtx};
+		const auto start = uptime_micros();
+		const auto wait_us = wait_ms * 1'000ULL;
+		while (value == old) {
+			const auto elapsed = uptime_micros() - start;
+			if (elapsed >= wait_us) break;
+			cv.wait_for(lock, std::chrono::microseconds(wait_us - elapsed), [this, old] { return value != old; });
+		}
+	}
+
+	atomic_waiting_lock::guard atomic_waiting_lock::lock(bool wait) {
+		return guard(*this, wait);
+	}
+
+	atomic_waiting_lock::operator bool() const noexcept {
+		std::lock_guard lock {mtx};
+		return value;
+	}
+
+	atomic_waiting_lock::guard::guard(atomic_waiting_lock& atom, bool wait) : atom(atom) {
+		if (wait) {
+			std::unique_lock lock {this->atom.mtx};
+			this->atom.cv.wait(lock, [this] { return not this->atom.value; });
+			this->atom.value = true;
+		}
+		else {
+			std::lock_guard lock {this->atom.mtx};
+			this->atom.value = true;
+		}
+		this->atom.cv.notify_one();
+	}
+
+	atomic_waiting_lock::guard::~guard() noexcept {
+		{
+			std::lock_guard lock {this->atom.mtx};
+			this->atom.value = false;
+		}
+		this->atom.cv.notify_one();
+	}
+
+	void atomic_wait(const atomic_waiting_lock& atom, bool old) noexcept {
+		atom.wait(old);
+	}
+
+	void atomic_wait_for(const atomic_waiting_lock& atom, bool old, const uint64_t wait_ms) {
+		atom.wait_for(old, wait_ms);
 	}
 
 	string readfile(const std::filesystem::path& path, const string& fallback) {
@@ -667,3 +730,40 @@ namespace Tools {
 		return running;
 	}
 }
+
+const string Fx::e = "\x1b[";		//* Escape sequence start
+const string Fx::b = e + "1m";		//* Bold on/off
+const string Fx::ub = e + "22m";	//* Bold off
+const string Fx::d = e + "2m";		//* Dark on
+const string Fx::ud = e + "22m";	//* Dark off
+const string Fx::i = e + "3m";		//* Italic on
+const string Fx::ui = e + "23m";	//* Italic off
+const string Fx::ul = e + "4m";		//* Underline on
+const string Fx::uul = e + "24m";	//* Underline off
+const string Fx::bl = e + "5m";		//* Blink on
+const string Fx::ubl = e + "25m";	//* Blink off
+const string Fx::s = e + "9m";		//* Strike/crossed-out on
+const string Fx::us = e + "29m";	//* Strike/crossed-out on/off
+
+//* Reset foreground/background color and text effects
+const string Fx::reset_base = e + "0m";
+
+//* Regex for matching color, style and cursor move escape sequences
+const std::regex Fx::escape_regex("\033\\[\\d+;?\\d?;?\\d*;?\\d*;?\\d*(m|f|s|u|C|D|A|B){1}");
+
+//* Regex for matching only color and style escape sequences
+const std::regex Fx::color_regex("\033\\[\\d+;?\\d?;?\\d*;?\\d*;?\\d*(m){1}");
+
+const string Term::hide_cursor = Fx::e + "?25l";
+const string Term::show_cursor = Fx::e + "?25h";
+const string Term::alt_screen = Fx::e + "?1049h";
+const string Term::normal_screen = Fx::e + "?1049l";
+const string Term::clear = Fx::e + "2J" + Fx::e + "0;0f";
+const string Term::clear_end = Fx::e + "0J";
+const string Term::clear_begin = Fx::e + "1J";
+const string Term::mouse_on = Fx::e + "?1002h" + Fx::e + "?1015h" + Fx::e + "?1006h"; //? Enable reporting of mouse position on click and release
+const string Term::mouse_off = Fx::e + "?1002l" + Fx::e + "?1015l" + Fx::e + "?1006l";
+const string Term::mouse_direct_on = Fx::e + "?1003h"; //? Enable reporting of mouse position at any movement
+const string Term::mouse_direct_off = Fx::e + "?1003l";
+const string Term::sync_start = Fx::e + "?2026h"; //? Start of terminal synchronized output
+const string Term::sync_end = Fx::e + "?2026l"; //? End of terminal synchronized output

@@ -94,16 +94,15 @@ namespace Global {
 		{"#801414", "██████╔╝   ██║   ╚██████╔╝██║        ╚═╝    ╚═╝"},
 		{"#000000", "╚═════╝    ╚═╝    ╚═════╝ ╚═╝"},
 	};
-	const string Version = "1.4.6";
+	const string Version = "1.4.7";
 
 	int coreCount;
 	string overlay;
 	string clock;
 
-	string bg_black = "\x1b[0;40m";
 	string fg_white = "\x1b[1;97m";
 	string fg_green = "\x1b[1;92m";
-	string fg_red = "\x1b[0;91m";
+	string fg_red = "\x1b[1;91m";
 
 	uid_t real_uid, set_uid;
 
@@ -160,12 +159,12 @@ void term_resize(bool force) {
 		sleep_ms(100);
 		if (Term::width < minWidth or Term::height < minHeight) {
 			int width = Term::width, height = Term::height;
-			cout << fmt::format("{clear}{bg_black}{fg_white}"
+			cout << fmt::format("{clear}{fg_white}"
 					"{mv1}Terminal size too small:"
 					"{mv2} Width = {fg_width}{width} {fg_white}Height = {fg_height}{height}"
 					"{mv3}{fg_white}Needed for current config:"
 					"{mv4}Width = {minWidth} Height = {minHeight}",
-					"clear"_a = Term::clear, "bg_black"_a = Global::bg_black, "fg_white"_a = Global::fg_white,
+					"clear"_a = Term::clear, "fg_white"_a = Global::fg_white,
 					"mv1"_a = Mv::to((height / 2) - 2, (width / 2) - 11),
 					"mv2"_a = Mv::to((height / 2) - 1, (width / 2) - 10),
 						"fg_width"_a = (width < minWidth ? Global::fg_red : Global::fg_green),
@@ -217,13 +216,11 @@ void clean_quit(int sig) {
 	#if defined __APPLE__ || defined __OpenBSD__ || defined __NetBSD__
 		if (pthread_join(Runner::runner_id, nullptr) != 0) {
 			Logger::warning("Failed to join _runner thread on exit!");
-			pthread_cancel(Runner::runner_id);
 		}
 	#else
 		constexpr struct timespec ts { .tv_sec = 5, .tv_nsec = 0 };
 		if (pthread_timedjoin_np(Runner::runner_id, nullptr, &ts) != 0) {
 			Logger::warning("Failed to join _runner thread on exit!");
-			pthread_cancel(Runner::runner_id);
 		}
 	#endif
 	}
@@ -231,6 +228,10 @@ void clean_quit(int sig) {
 #ifdef GPU_SUPPORT
 	Gpu::Nvml::shutdown();
 	Gpu::Rsmi::shutdown();
+	Gpu::Asysfs::shutdown();
+	#ifdef __APPLE__
+	Gpu::AppleSilicon::shutdown();
+	#endif
 #endif
 
 
@@ -289,14 +290,9 @@ static void _crash_handler(const int sig) {
 static void _signal_handler(const int sig) {
 	switch (sig) {
 		case SIGINT:
-			if (Runner::active) {
-				Global::should_quit = true;
-				Runner::stopping = true;
-				Input::interrupt();
-			}
-			else {
-				clean_quit(0);
-			}
+			Global::should_quit = true;
+			if (Runner::active) Runner::stopping = true;
+			Input::interrupt();
 			break;
 		case SIGTSTP:
 			if (Runner::active) {
@@ -312,7 +308,8 @@ static void _signal_handler(const int sig) {
 			_resume();
 			break;
 		case SIGWINCH:
-			term_resize();
+			Global::resized = true;
+			Input::interrupt();
 			break;
 		case SIGUSR1:
 			// Input::poll interrupt
@@ -355,15 +352,14 @@ void init_config(bool low_color, std::optional<std::string>& filter) {
 
 //* Manages secondary thread for collection and drawing of boxes
 namespace Runner {
-	atomic<bool> active (false);
+	atomic_waiting_lock active;
 	atomic<bool> stopping (false);
 	atomic<bool> waiting (false);
 	atomic<bool> redraw (false);
 	atomic<bool> coreNum_reset (false);
 
 	static inline auto set_active(bool value) noexcept {
-		active.store(value, std::memory_order_relaxed);
-		active.notify_all();
+		active.store(value);
 	}
 
 	//* Setup semaphore for triggering thread to do work
@@ -465,15 +461,15 @@ namespace Runner {
 		sigaddset(&mask, SIGTERM);
 		pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 
-		// TODO: On first glance it looks redudant with `Runner::active`. 
+		// TODO: On first glance it looks redudant with `Runner::active`.
 		std::lock_guard lock {mtx};
 
 		//* ----------------------------------------------- THREAD LOOP -----------------------------------------------
 		while (not Global::quitting) {
 			thread_wait();
-			atomic_wait_for(active, true, 5000);
+			atomic_wait_for(active, true, 30'000);
 			if (active) {
-				Global::exit_error_msg = "Runner thread failed to get active lock!";
+				Global::exit_error_msg = "Runner thread failed to get active lock (30s)!";
 				Global::thread_exception = true;
 				Input::interrupt();
 				stopping = true;
@@ -484,7 +480,7 @@ namespace Runner {
 			}
 
 			//? Atomic lock used for blocking non thread-safe actions in main thread
-			atomic_lock lck(active);
+			auto lck = active.lock();
 
 			//? Set effective user if SUID bit is set
 			gain_priv powers{};
@@ -734,24 +730,14 @@ namespace Runner {
 
 	//* Runs collect and draw in a secondary thread, unlocks and locks config to update cached values
 	void run(const string& box, bool no_update, bool force_redraw) {
-		atomic_wait_for(active, true, 5000);
+		atomic_wait_for(active, true, 10'000);
 		if (active) {
-			Logger::error("Stall in Runner thread, restarting!");
-			set_active(false);
-			// exit(1);
-			pthread_cancel(Runner::runner_id);
-
-			// Wait for the thread to actually terminate before creating a new one
-			void* thread_result;
-			int join_result = pthread_join(Runner::runner_id, &thread_result);
-			if (join_result != 0) {
-				Logger::warning("Failed to join cancelled thread: {}", strerror(join_result));
-			}
-
-			if (pthread_create(&Runner::runner_id, nullptr, &Runner::_runner, nullptr) != 0) {
-				Global::exit_error_msg = "Failed to re-create _runner thread!";
-				clean_quit(1);
-			}
+			Logger::warning("Runner thread slow (>10s), waiting up to 30s...");
+			atomic_wait_for(active, true, 20'000);
+		}
+		if (active) {
+			Global::exit_error_msg = "Runner thread stalled for 30s, exiting.";
+			clean_quit(1);
 		}
 		if (stopping or Global::resized) return;
 
@@ -796,14 +782,14 @@ namespace Runner {
 			Global::exit_error_msg = "Runner thread died unexpectedly!";
 			clean_quit(1);
 		} else if (is_runner_busy) {
-			atomic_wait_for(active, true, 5000);
+			atomic_wait_for(active, true, 30'000);
 			if (active) {
 				set_active(false);
 				if (Global::quitting) {
 					return;
 				}
 				else {
-					Global::exit_error_msg = "No response from Runner thread, quitting!";
+					Global::exit_error_msg = "No response from Runner thread (30s), quitting!";
 					clean_quit(1);
 				}
 			}
@@ -875,13 +861,12 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 
 	{
 		const auto config_dir = Config::get_config_dir();
-		if (config_dir.has_value()) {
+
+		if (cli.config_file.has_value()) {
+			Config::conf_file = cli.config_file.value();
+		} else if (config_dir.has_value()) {
 			Config::conf_dir = config_dir.value();
-			if (cli.config_file.has_value()) {
-				Config::conf_file = cli.config_file.value();
-			} else {
-				Config::conf_file = Config::conf_dir / "btop.conf";
-			}
+			Config::conf_file = Config::conf_dir / "btop.conf";
 
 			auto log_file = Config::get_log_file();
 			if (log_file.has_value()) {
@@ -1197,7 +1182,7 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 		}
 	}
 	catch (const std::exception& e) {
-		Global::exit_error_msg = fmt::format("Exception in main loop -> ", e.what());
+		Global::exit_error_msg = fmt::format("Exception in main loop -> {}", e.what());
 		clean_quit(1);
 	}
 	return 0;

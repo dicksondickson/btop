@@ -47,6 +47,24 @@ namespace rng = std::ranges;
 using namespace std::literals;
 using namespace Tools;
 
+const vector<string> Config::valid_graph_symbols = { "braille", "block", "tty" };
+const vector<string> Config::valid_graph_symbols_def = { "default", "braille", "block", "tty" };
+const vector<string> Config::valid_boxes = {
+	"cpu", "mem", "net", "proc"
+#ifdef GPU_SUPPORT
+	,"gpu0", "gpu1", "gpu2", "gpu3", "gpu4", "gpu5"
+#endif
+};
+const vector<string> Config::temp_scales = { "celsius", "fahrenheit", "kelvin", "rankine" };
+#ifdef __linux__
+const vector<string> Config::freq_modes = { "first", "range", "lowest", "highest", "average" };
+#endif
+#ifdef GPU_SUPPORT
+const vector<string> Config::show_gpu_values = { "Auto", "On", "Off" };
+#endif
+const vector<string> Config::base_10_bitrate_values = { "Auto", "True", "False" };
+const vector<string> Config::disable_preset_options = { "Off", "Default", "Custom", "All" };
+
 //* Functions and variables for reading and writing the btop config file
 namespace Config {
 
@@ -131,6 +149,9 @@ namespace Config {
 
 		{"proc_aggregate",		"#* In tree-view, always accumulate child process resources in the parent process."},
 
+		{"proc_tree_auto_collapse", "#* In tree-view, auto-collapse processes with this many or more direct children when\n"
+									"#* entering tree mode. 0 to disable. Useful for collapsing multi-process apps like browsers."},
+
 		{"keep_dead_proc_usage", "#* Should cpu and memory usage display be preserved for dead processes when paused."},
 
 		{"cpu_graph_upper", 	"#* Sets the CPU stat shown in upper half of the CPU graph, \"total\" is always available.\n"
@@ -178,7 +199,7 @@ namespace Config {
 		{"custom_cpu_name", 	"#* Custom cpu model name, empty string to disable."},
 
 		{"disks_filter", 		"#* Optional filter for shown disks, should be full path of a mountpoint, separate multiple values with whitespace \" \".\n"
-									"#* Only disks matching the filter will be shown. Prepend exclude= to only show disks not matching the filter. Examples: disk_filter=\"/boot /home/user\", disks_filter=\"exclude=/boot /home/user\""},
+									"#* Only disks matching the filter will be shown. Prepend exclude= to only show disks not matching the filter. Examples: disks_filter=\"/boot /home/user\", disks_filter=\"exclude=/boot /home/user\""},
 
 		{"mem_graphs", 			"#* Show graphs instead of meters for memory values."},
 
@@ -239,7 +260,7 @@ namespace Config {
 		{"rsmi_measure_pcie_speeds",
 								"#* Measure PCIe throughput on AMD cards, may impact performance on certain cards."},
 		{"gpu_mirror_graph",	"#* Horizontally mirror the GPU graph."},
-		{"shown_gpus",			"#* Set which GPU vendors to show. Available values are \"nvidia amd intel\""},
+		{"shown_gpus",			"#* Set which GPU vendors to show. Available values are \"nvidia amd intel apple\""},
 		{"custom_gpu_name0",	"#* Custom gpu0 model name, empty string to disable."},
 		{"custom_gpu_name1",	"#* Custom gpu1 model name, empty string to disable."},
 		{"custom_gpu_name2",	"#* Custom gpu2 model name, empty string to disable."},
@@ -288,7 +309,7 @@ namespace Config {
 		{"custom_gpu_name4", ""},
 		{"custom_gpu_name5", ""},
 		{"show_gpu_info", "Auto"},
-		{"shown_gpus", "nvidia amd intel"}
+		{"shown_gpus", "nvidia amd intel apple"}
 	#endif
 	};
 	std::unordered_map<std::string_view, string> stringsTmp;
@@ -364,6 +385,7 @@ namespace Config {
 		{"update_ms", 2000},
 		{"net_download", 100},
 		{"net_upload", 100},
+		{"proc_tree_auto_collapse", 0},
 		{"detailed_pid", 0},
 		{"restore_detailed_pid", 0},
 		{"selected_pid", 0},
@@ -557,6 +579,12 @@ namespace Config {
 
 		else if (name == "update_ms" and i_value > ONE_DAY_MILLIS)
 			validError = fmt::format("Config value update_ms set too high (>{}).", ONE_DAY_MILLIS);
+
+		else if (name == "proc_tree_auto_collapse" and i_value < 0)
+			validError = "Config value proc_tree_auto_collapse must be >= 0.";
+
+		else if (name == "proc_tree_auto_collapse" and i_value > 10000)
+			validError = "Config value proc_tree_auto_collapse set too high (>10000).";
 
 		else
 			return true;

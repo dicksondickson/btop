@@ -51,6 +51,10 @@ using std::vector;
 
 using namespace std::literals; // for operator""s
 
+namespace Tools {
+	class atomic_waiting_lock;
+}
+
 void term_resize(bool force=false);
 void banner_gen();
 
@@ -71,7 +75,7 @@ namespace Global {
 }
 
 namespace Runner {
-	extern atomic<bool> active;
+	extern Tools::atomic_waiting_lock active;
 	extern atomic<bool> reading;
 	extern atomic<bool> stopping;
 	extern atomic<bool> redraw;
@@ -120,7 +124,7 @@ namespace Gpu {
 
 	extern std::unordered_map<string, deque<long long>> shared_gpu_percent; // averages, power/vram total
 
-	const array mem_names { "used"s, "free"s };
+	extern const array<string, 2> mem_names;
 
 	//* Container for process information // TODO
 	/*struct proc_info {
@@ -183,6 +187,14 @@ namespace Gpu {
 	namespace Rsmi {
 		extern bool shutdown();
 	}
+	namespace Asysfs {
+		extern bool shutdown();
+	}
+	#ifdef __APPLE__
+	namespace AppleSilicon {
+		extern bool shutdown();
+	}
+	#endif
 
 	//* Collect gpu stats and temperatures
     auto collect(bool no_update = false) -> vector<gpu_info>&;
@@ -355,37 +367,16 @@ namespace Proc {
 	extern bool shown, redraw;
 	extern int select_max;
 	extern atomic<int> detailed_pid;
-	extern int selected_pid, start, selected, collapse, expand, filter_found, selected_depth, toggle_children;
+	extern int selected_pid, start, selected, collapse, expand, filter_found, selected_depth, toggle_children, collapse_all;
 	extern int scroll_pos;
 	extern string selected_name;
 	extern atomic<bool> resized;
 
 	//? Contains the valid sorting options for processes
-	const vector<string> sort_vector = {
-		"pid",
-		"name",
-		"command",
-		"threads",
-		"user",
-		"memory",
-		"cpu direct",
-		"cpu lazy",
-	};
+	extern const vector<string> sort_vector;
 
 	//? Translation from process state char to explanative string
-	const std::unordered_map<char, string> proc_states = {
-		{'R', "Running"},
-		{'S', "Sleeping"},
-		{'D', "Waiting"},
-		{'Z', "Zombie"},
-		{'T', "Stopped"},
-		{'t', "Tracing"},
-		{'X', "Dead"},
-		{'x', "Dead"},
-		{'K', "Wakekill"},
-		{'W', "Unknown"},
-		{'P', "Parked"}
-	};
+	extern const std::unordered_map<char, string> proc_states;
 
 	//* Container for process information
 	struct proc_info {
@@ -459,6 +450,12 @@ namespace Proc {
 
 	//* Build prefixes for tree view
 	void _collect_prefixes(tree_proc& t, bool is_last, const string &header = "");
+
+	//* Toggle collapse/expand of all tree entries
+	void toggle_tree_collapse(std::vector<proc_info>& current_procs);
+
+	//* Auto-collapse processes with many direct children when entering tree mode
+	void _auto_collapse_oversized(std::vector<proc_info>& current_procs, const bool tree_mode_change);
 }
 
 /// Detect container engine.
