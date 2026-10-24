@@ -1,7 +1,7 @@
 
 # BTOP FOR DGX SPARK
 
-This repo is a fork of https://github.com/haven-jeon/btop by Heewon Jeon. I merged all the upstream PRs from mainline up to BTOP v1.4.7 release. All credit goes to Heewon Jeon for making it work on the DGX spark. 
+This repo is a fork of https://github.com/haven-jeon/btop by Heewon Jeon. I merged all the upstream commits from mainline up to Sept 2026. All credit goes to Heewon Jeon for making it work on the DGX spark. 
 
 # =========
 
